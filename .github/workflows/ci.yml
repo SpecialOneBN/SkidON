@@ -7,7 +7,7 @@ on:
     branches: [ main, develop ]
 
 env:
-  GO_VERSION: '1.21'
+  GO_VERSION: '1.24.1'
   DOCKER_REGISTRY: ghcr.io
   IMAGE_NAME: skidon
 
@@ -97,7 +97,7 @@ jobs:
 
     strategy:
       matrix:
-        service: [api-gateway, parser-service, product-service, user-service, notification-service]
+        service: [analytics-service, api-gateway, parser-service, product-service, user-service, notification-service]
 
     steps:
       - name: Checkout code
