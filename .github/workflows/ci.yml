@@ -117,7 +117,7 @@ jobs:
           file: ./services/${{ matrix.service }}/coverage.out
           flags: ${{ matrix.service }}
           name: ${{ matrix.service }}
-        if: hashFiles(format('services/{0}/coverage.out', matrix.service)) != ''
+        if: always() && hashFiles(format('services/{0}/coverage.out', matrix.service)) != ''
 
       - name: Run security scan for ${{ matrix.service }}
         working-directory: ./services/${{ matrix.service }}
@@ -175,27 +175,39 @@ jobs:
   lint-shared:
     name: Lint Shared Code
     runs-on: ubuntu-latest
-    if: hashFiles('shared/go.mod') != ''
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Check if shared go.mod exists
+        id: check-shared
+        run: |
+          if [ -f "shared/go.mod" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Set up Go
+        if: steps.check-shared.outputs.exists == 'true'
         uses: actions/setup-go@v4
         with:
           go-version: ${{ env.GO_VERSION }}
 
       - name: Install dependencies for shared
+        if: steps.check-shared.outputs.exists == 'true'
         working-directory: ./shared
         run: |
           go mod tidy
           go mod download
 
       - name: Install golangci-lint
+        if: steps.check-shared.outputs.exists == 'true'
         run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 
       - name: Run golangci-lint for shared
+        if: steps.check-shared.outputs.exists == 'true'
         working-directory: ./shared
         run: golangci-lint run --timeout=5m ./...
 
