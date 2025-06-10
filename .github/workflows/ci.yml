@@ -12,10 +12,14 @@ env:
   IMAGE_NAME: skidon
 
 jobs:
-  # Тестирование и линтинг
+  # Тестирование и линтинг каждого сервиса
   test:
     name: Test and Lint
     runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        service: [analytics-service, api-gateway, parser-service, product-service, user-service, notification-service]
 
     services:
       postgres:
@@ -51,40 +55,72 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Cache Go modules
+      - name: Cache Go modules for ${{ matrix.service }}
         uses: actions/cache@v3
         with:
           path: |
             ~/.cache/go-build
             ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-${{ matrix.service }}-${{ hashFiles(format('services/{0}/go.sum', matrix.service)) }}
           restore-keys: |
+            ${{ runner.os }}-go-${{ matrix.service }}-
             ${{ runner.os }}-go-
 
-      - name: Install dependencies
+      - name: Verify service structure
         run: |
-          go mod download
-          go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
-          go install github.com/securecodewarrior/sast-scan@latest
+          echo "Checking service: ${{ matrix.service }}"
+          if [ ! -d "services/${{ matrix.service }}" ]; then
+            echo "Service directory services/${{ matrix.service }} not found"
+            echo "Available services:"
+            ls -la services/
+            exit 1
+          fi
+          
+          if [ ! -f "services/${{ matrix.service }}/go.mod" ]; then
+            echo "go.mod not found in services/${{ matrix.service }}"
+            echo "Contents of services/${{ matrix.service }}:"
+            ls -la services/${{ matrix.service }}/
+            exit 1
+          fi
+          
+          echo "go.mod found for ${{ matrix.service }}"
 
-      - name: Run golangci-lint
+      - name: Install dependencies for ${{ matrix.service }}
+        working-directory: ./services/${{ matrix.service }}
+        run: |
+          go mod tidy
+          go mod download
+
+      - name: Install linting tools
+        run: |
+          go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+          go install github.com/sonatypecommunity/nancy@latest
+
+      - name: Run golangci-lint for ${{ matrix.service }}
+        working-directory: ./services/${{ matrix.service }}
         run: golangci-lint run --timeout=5m ./...
 
-      - name: Run tests
+      - name: Run tests for ${{ matrix.service }}
+        working-directory: ./services/${{ matrix.service }}
         env:
-          DATABASE_URL: postgres://testuser:testpass@localhost:5432/testdb?sslmode=disable
+          DATABASE_URL: postgres://postgres:mypass@localhost:5432/skidon?sslmode=disable
           REDIS_URL: redis://localhost:6379
         run: |
           go test -v -race -coverprofile=coverage.out ./...
-          go tool cover -html=coverage.out -o coverage.html
+          if [ -f coverage.out ]; then
+            go tool cover -html=coverage.out -o coverage.html
+          fi
 
-      - name: Upload coverage reports
+      - name: Upload coverage reports for ${{ matrix.service }}
         uses: codecov/codecov-action@v3
         with:
-          file: ./coverage.out
-          flags: unittests
+          file: ./services/${{ matrix.service }}/coverage.out
+          flags: ${{ matrix.service }}
+          name: ${{ matrix.service }}
+        if: hashFiles(format('services/{0}/coverage.out', matrix.service)) != ''
 
-      - name: Run security scan
+      - name: Run security scan for ${{ matrix.service }}
+        working-directory: ./services/${{ matrix.service }}
         run: |
           go list -json -deps ./... | nancy sleuth
 
@@ -127,13 +163,41 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
-          context: ./${{ matrix.service }}
+          context: ./services/${{ matrix.service }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64,linux/arm64
+
+  # Линтинг общих файлов (если есть shared код)
+  lint-shared:
+    name: Lint Shared Code
+    runs-on: ubuntu-latest
+    if: hashFiles('shared/go.mod') != ''
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Install dependencies for shared
+        working-directory: ./shared
+        run: |
+          go mod tidy
+          go mod download
+
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+
+      - name: Run golangci-lint for shared
+        working-directory: ./shared
+        run: golangci-lint run --timeout=5m ./...
 
   # Развертывание в staging
   deploy-staging:
@@ -150,7 +214,8 @@ jobs:
       - name: Deploy to staging
         run: |
           echo "Deploying to staging environment..."
-          # Здесь будет деплой в staging (Docker Swarm, Kubernetes, etc.)
+          # Используйте docker-compose или другой инструмент для деплоя всех сервисов
+          # docker-compose -f deploy/staging/docker-compose.yml up -d
 
   # Развертывание в production
   deploy-production:
@@ -167,7 +232,8 @@ jobs:
       - name: Deploy to production
         run: |
           echo "Deploying to production environment..."
-          # Здесь будет деплой в production
+          # Используйте docker-compose или другой инструмент для деплоя всех сервисов
+          # docker-compose -f deploy/production/docker-compose.yml up -d
 
   # Мониторинг качества кода
   sonarcloud:
@@ -176,14 +242,20 @@ jobs:
     needs: test
     if: github.event_name == 'push'
 
+    strategy:
+      matrix:
+        service: [analytics-service, api-gateway, parser-service, product-service, user-service, notification-service]
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: SonarCloud Scan
+      - name: SonarCloud Scan for ${{ matrix.service }}
         uses: SonarSource/sonarcloud-github-action@master
+        with:
+          projectBaseDir: services/${{ matrix.service }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
